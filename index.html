@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>PD2 Shader Tool</title>
+<script src="/static/tailwind.js"></script>
+<script>
+  tailwind.config = { theme: { extend: { colors: {
+    bg:'#1e1f24', panel:'#26272e', panel2:'#2d2e36', fg:'#d8d9e0',
+    dim:'#8b8d98', acc:'#6ea8fe', warn:'#e8a33d', line:'#3a3b44', onacc:'#10131c',
+  } } } };
+</script>
+<style type="text/tailwindcss">
+  @layer components {
+    /* Reusable controls — Tailwind's Preflight resets native inputs/buttons */
+    .btn   { @apply bg-panel2 text-fg border border-line rounded-md px-3 py-1
+                    cursor-pointer hover:border-acc; }
+    .field { @apply bg-bg text-fg border border-line rounded-md px-2 py-1
+                    outline-none focus:border-acc; }
+
+    /* Tree */
+    .tnode    { @apply cursor-pointer px-2.5 py-0.5 whitespace-nowrap hover:bg-panel2; }
+    .tmpl     { @apply font-semibold; }
+    .mode     { @apply pl-[26px] text-dim; }
+    .pass     { @apply pl-[44px]; }
+    .pass.sel { @apply bg-acc text-onacc rounded; }
+    .caret    { @apply inline-block w-3.5 text-dim; }
+
+    /* Tabs */
+    .tab     { @apply px-3.5 py-1.5 cursor-pointer border border-transparent
+                      border-b-0 rounded-t-md text-dim; }
+    .tab.sel { @apply bg-bg border-line text-fg; }
+
+    /* Value tables */
+    td.val       { @apply cursor-pointer hover:text-acc; }
+    .texhead td  { @apply bg-panel2 font-semibold; }
+
+    /* Blob toolbar + find box */
+    .blobbar  { @apply mb-2.5 flex gap-2 items-center text-dim flex-wrap; }
+    .findwrap { @apply flex gap-1 items-center ml-auto; }
+
+    /* Popovers (enum dropdown + inline value editor) */
+    .dd         { @apply fixed z-50 bg-panel2 text-fg border border-acc rounded-md
+                         min-w-[170px] max-h-[280px] overflow-auto outline-none p-[3px]
+                         shadow-[0_8px_24px_rgba(0,0,0,0.55)]; }
+    .dd > div   { @apply px-3 py-1 cursor-pointer whitespace-nowrap rounded; }
+    .dd div.act { @apply bg-acc text-onacc; }
+    .dd.ddedit  { @apply p-1.5; }
+    .ddboxes       { @apply flex flex-col gap-0.5; }
+    .ddboxes label { @apply flex gap-1.5 items-center px-2 py-[3px] rounded cursor-pointer
+                            whitespace-nowrap hover:bg-acc hover:text-onacc; }
+
+    .hint  { @apply text-dim text-xs mt-2; }
+    .empty { @apply text-dim p-10 text-center; }
+
+    /* Value tables (Preflight strips table borders/padding) */
+    #tabbody table     { @apply w-full max-w-[860px] border-collapse; }
+    #tabbody th, #tabbody td { @apply text-left align-top px-2.5 py-1 border-b border-line; }
+    #tabbody th        { @apply text-dim font-medium; }
+  }
+
+  /* Leftovers @apply can't express: pseudo-element content, <mark>, status colour */
+  .pass.dirty::before     { content:"* "; color:#e8a33d; }
+  .pass.sel.dirty::before { color:#7a4a00; }
+  .dd div.sel             { font-weight:600; }
+  .dd div.sel::after      { content:" ✓"; color:#6ea8fe; }
+  .dd div.act.sel::after  { color:#10131c; }
+  mark      { background:#8a6d1f; color:#fff; border-radius:2px; padding:0 1px; }
+  mark.cur  { background:#6ea8fe; color:#10131c; }
+  #status.err { color:#ff7b72; }
+  [x-cloak] { display:none; }
+</style>
+<script defer src="/static/alpine.min.js"></script>
+</head>
+<body class="h-screen flex flex-col bg-bg text-fg text-[13px] leading-[1.45] font-sans"
+      x-data="app()" @keydown.window="hotkeyFind($event)">
+<header class="flex gap-2 items-center px-3 py-2 bg-panel border-b border-line flex-wrap">
+  <b>PD2 Shader Tool</b>
+  <input type="text" class="field w-[430px]" placeholder="/path/to/file.shaders"
+         x-model="pathInput" @keydown.enter="openFile()">
+  <button class="btn" @click="openFile()">Open</button>
+  <button class="btn" @click="saveFile(false)">Save</button>
+  <button class="btn" @click="saveFile(true)">Save As…</button>
+  <button class="btn" @click="verify()">Verify round-trip</button>
+  <button class="btn" @click="exportAll()">Export all blobs…</button>
+</header>
+<div class="flex flex-1 min-h-0">
+  <!-- Render-template tree -->
+  <div class="w-[380px] overflow-auto bg-panel border-r border-line py-1.5">
+    <template x-if="!file"><div class="empty">No file loaded</div></template>
+    <template x-for="t in tree" :key="t.name">
+      <div>
+        <div class="tnode tmpl" :title="t.name" @click="open[t.name] = !open[t.name]">
+          <span class="caret" x-text="open[t.name] ? '▾' : '▸'"></span><span x-text="t.name"></span>
+        </div>
+        <div x-show="open[t.name]">
+          <template x-for="m in t.modes" :key="m.name">
+            <div>
+              <div class="tnode mode" x-text="m.name"></div>
+              <template x-for="p in m.passes" :key="p.ref">
+                <div class="tnode pass" :class="{sel: p.ref === curRef, dirty: p.dirty}"
+                     @click="selectPass(p.ref)" x-text="p.label"></div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <div class="flex-1 flex flex-col min-w-0">
+    <div class="flex gap-0.5 bg-panel border-b border-line px-2.5 pt-1.5">
+      <template x-for="t in tabs" :key="t.id">
+        <div class="tab" :class="{sel: curTab === t.id}" @click="curTab = t.id" x-text="t.label"></div>
+      </template>
+    </div>
+
+    <div id="tabbody" class="flex-1 overflow-auto p-3" @scroll="closeDropdown()">
+      <template x-if="!detail"><div class="empty">Select a shader pass</div></template>
+
+      <!-- State vars -->
+      <template x-if="detail && curTab === 'sv'">
+        <div>
+          <table>
+            <thead><tr><th>ID</th><th>Name</th><th>Value</th></tr></thead>
+            <tbody>
+              <template x-for="(v, i) in detail.state_vars" :key="i">
+                <tr>
+                  <td x-text="v.id"></td>
+                  <td x-text="v.name"></td>
+                  <td class="val" @click="editValue($event.currentTarget, 'sv', 0, i)" x-text="v.value"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <p class="hint">Click a value to edit</p>
+        </div>
+      </template>
+
+      <!-- Texture blocks -->
+      <template x-if="detail && curTab === 'tex'">
+        <div>
+          <template x-if="!detail.textures.length"><div class="empty">No texture blocks</div></template>
+          <template x-if="detail.textures.length">
+            <div>
+              <table>
+                <thead><tr><th>ID</th><th>Name</th><th>Value</th></tr></thead>
+                <template x-for="(b, bi) in detail.textures" :key="bi">
+                  <tbody>
+                    <tr class="texhead"><td colspan="3" x-text="b.label"></td></tr>
+                    <template x-for="(v, vi) in b.vars" :key="vi">
+                      <tr>
+                        <td x-text="v.id"></td>
+                        <td x-text="v.name"></td>
+                        <td class="val" @click="editValue($event.currentTarget, 'tex', bi, vi)" x-text="v.value"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </template>
+              </table>
+              <p class="hint">Click a value to edit</p>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- Vertex / pixel shader disassembly -->
+      <template x-if="detail && (curTab === 'vs' || curTab === 'ps')">
+        <div>
+          <div class="blobbar">
+            <span x-text="detail[curTab].size + ' bytes'"></span>
+            <button class="btn" @click="exportBlob()">Export blob…</button>
+            <button class="btn" @click="importBlob()">Import blob…</button>
+            <span class="findwrap">
+              <input x-ref="findbox" class="field w-[180px]" x-model="findQ"
+                     @input="findIdx = 0" @keydown="findKey($event)"
+                     :placeholder="'Find… (' + (isMac ? '⌘' : 'Ctrl+') + 'F)'">
+              <span class="min-w-[60px] text-right text-xs" x-text="findLabel()"></span>
+              <button class="btn px-2" @click="findStep(-1)" title="Previous (Shift+Enter)">▲</button>
+              <button class="btn px-2" @click="findStep(1)" title="Next (Enter)">▼</button>
+            </span>
+          </div>
+          <pre class="font-mono text-xs leading-snug whitespace-pre" x-html="highlightedAsm()"
+               x-effect="scrollOnFind(findQ, findIdx, curTab, detail, $el)"></pre>
+        </div>
+      </template>
+    </div>
+  </div>
+</div>
+<div id="status" class="px-3 py-1.5 bg-panel text-dim border-t border-line whitespace-nowrap overflow-hidden text-ellipsis"
+     :class="{err: statusErr}" x-text="statusMsg">Ready</div>
+<input type="file" id="blobfile" class="hidden">
+
+<script>
+const isMac = navigator.platform.toUpperCase().includes('MAC');
+function esc(s) { const d = document.createElement('span');
+  d.textContent = s; return d.innerHTML; }
+
+function app() {
+  return {
+    // --- reactive state ---
+    file: null, dirty: false, lastFile: null,
+    counts: {templates: 0, passes: 0}, hashlist: {path: null, count: 0},
+    tree: [], open: {},
+    detail: null, curRef: null, curTab: 'sv',
+    pathInput: '', isMac,
+    statusMsg: 'Ready', statusErr: false,
+    findQ: '', findIdx: 0,
+    tabs: [{id: 'sv', label: 'State Vars'}, {id: 'tex', label: 'Textures'},
+           {id: 'vs', label: 'Vertex Shader'}, {id: 'ps', label: 'Pixel Shader'}],
+
+    init() {
+      window.addEventListener('beforeunload', e => {
+        if (this.dirty) { e.preventDefault(); e.returnValue = ''; }
+      });
+      this.loadState().then(() => {
+        if (this.file) return;            // opened via command line
+        if (this.pathInput) this.openFile();
+      });
+    },
+
+    // --- server I/O ---
+    async api(path, opts) {
+      const r = await fetch(path, opts);
+      const j = await r.json().catch(() => ({error: 'bad response'}));
+      if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+      return j;
+    },
+    setStatus(msg, err = false) { this.statusMsg = msg; this.statusErr = !!err; },
+    applyStateFrom(s) {
+      this.file = s.file; this.dirty = s.dirty;
+      this.counts = s.counts || {templates: 0, passes: 0};
+      this.hashlist = s.hashlist || {path: null, count: 0};
+      this.tree = s.tree || [];
+    },
+    async loadState() {
+      const s = await this.api('/api/state');
+      this.applyStateFrom(s);
+      this.lastFile = s.last_file;
+      let line = this.file
+        ? `${this.file} — ${this.counts.templates} render templates, ${this.counts.passes} passes`
+        : 'No file loaded';
+      if (this.file) line += this.hashlist.count
+        ? ` — hashlist: ${this.hashlist.count} names`
+        : ' — no hashlist (place a "hashlist" file next to the tool)';
+      if (this.dirty) line += '  [unsaved changes]';
+      this.setStatus(line);
+      if (!this.pathInput) this.pathInput = this.file || s.last_file || '';
+    },
+
+    // --- navigation ---
+    async selectPass(ref) {
+      this.curRef = ref;
+      this.detail = await this.api('/api/pass/' + ref);
+    },
+
+    // --- value editing (popovers live as standalone DOM widgets below) ---
+    editValue(td, scope, tex, index) {
+      const v = scope === 'sv' ? this.detail.state_vars[index]
+                               : this.detail.textures[tex].vars[index];
+      if (v.kind === 'enum')
+        showDropdown(td, v.choices, v.edit, val => this.applyVar(scope, tex, index, val));
+      else
+        showEditPopover(td, v, val => this.applyVar(scope, tex, index, val));
+    },
+    async applyVar(scope, tex, index, value) {
+      try {
+        const r = await this.api('/api/var', {method: 'POST', body: JSON.stringify(
+          {ref: this.curRef, scope, tex, index, value})});
+        this.detail = r.detail; this.applyStateFrom(r.state);
+        this.setStatus('Value updated  [unsaved changes]');
+      } catch (err) { this.setStatus('Edit failed: ' + err.message, true); }
+    },
+
+    // --- disassembly find/highlight ---
+    matches() {
+      if (!this.detail || !this.findQ) return [];
+      const hay = this.detail[this.curTab].asm.toLowerCase();
+      const needle = this.findQ.toLowerCase();
+      const out = [];
+      for (let at = hay.indexOf(needle); at !== -1; at = hay.indexOf(needle, at + needle.length))
+        out.push(at);
+      return out;
+    },
+    highlightedAsm() {
+      if (!this.detail) return '';
+      const asm = this.detail[this.curTab].asm;
+      const m = this.matches();
+      if (!m.length) return esc(asm);
+      const len = this.findQ.length;
+      let html = '', pos = 0;
+      m.forEach((at, n) => {
+        html += esc(asm.slice(pos, at)) +
+          `<mark${n === this.findIdx ? ' class="cur"' : ''}>` +
+          esc(asm.slice(at, at + len)) + '</mark>';
+        pos = at + len;
+      });
+      return html + esc(asm.slice(pos));
+    },
+    findLabel() {
+      if (!this.findQ) return '';
+      const n = this.matches().length;
+      return n ? `${Math.min(this.findIdx + 1, n)}/${n}` : 'no matches';
+    },
+    findStep(dir) {
+      const n = this.matches().length;
+      if (!n) return;
+      this.findIdx = (this.findIdx + dir + n) % n;
+    },
+    findKey(e) {
+      if (e.key === 'Enter') { e.preventDefault(); this.findStep(e.shiftKey ? -1 : 1); }
+      if (e.key === 'Escape') { this.findQ = ''; this.findIdx = 0; }
+    },
+    hotkeyFind(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f' &&
+          (this.curTab === 'vs' || this.curTab === 'ps') && this.$refs.findbox) {
+        e.preventDefault();
+        this.$refs.findbox.focus(); this.$refs.findbox.select();
+      }
+    },
+    // Referencing findQ/findIdx/curTab/detail as args keeps the effect tracking them.
+    scrollOnFind(_q, _i, _t, _d, el) {
+      this.$nextTick(() => {
+        const cur = el.querySelector('mark.cur');
+        if (cur) cur.scrollIntoView({block: 'center'});
+      });
+    },
+
+    // --- file actions ---
+    async openFile() {
+      const path = this.pathInput.trim();
+      if (!path) { this.setStatus('Enter a .shaders file path first', true); return; }
+      try {
+        this.curRef = null; this.detail = null;
+        await this.api('/api/open', {method: 'POST', body: JSON.stringify({path})});
+        await this.loadState();
+      } catch (e) { this.setStatus('Open failed: ' + e.message, true); }
+    },
+    async saveFile(saveAs) {
+      if (!this.file) return;
+      let path = null;
+      if (saveAs) { path = prompt('Save as (full path):', this.file); if (!path) return; }
+      try {
+        const r = await this.api('/api/save', {method: 'POST', body: JSON.stringify({path})});
+        this.applyStateFrom(r.state); this.setStatus(r.message);
+      } catch (e) { this.setStatus('Save failed: ' + e.message, true); }
+    },
+    async verify() {
+      if (!this.file) return;
+      try {
+        const r = await this.api('/api/verify', {method: 'POST'});
+        this.setStatus(r.message, !r.ok);
+      } catch (e) { this.setStatus('Verify failed: ' + e.message, true); }
+    },
+    async exportAll() {
+      if (!this.file) return;
+      const dir = prompt('Export all blobs to directory:', '~/Desktop/shader-export');
+      if (!dir) return;
+      try {
+        const r = await this.api('/api/export_all', {method: 'POST', body: JSON.stringify({dir})});
+        this.setStatus(r.message);
+      } catch (e) { this.setStatus('Export failed: ' + e.message, true); }
+    },
+    exportBlob() {
+      window.location = `/api/blob?ref=${this.curRef}&which=${this.curTab}`;
+    },
+    importBlob() {
+      const fi = document.getElementById('blobfile');
+      fi.onchange = async () => {
+        if (!fi.files.length) return;
+        const buf = await fi.files[0].arrayBuffer();
+        try {
+          const r = await this.api(`/api/blob?ref=${this.curRef}&which=${this.curTab}`,
+                                   {method: 'POST', body: buf});
+          this.detail = r.detail; this.applyStateFrom(r.state);
+          this.setStatus(`Imported ${buf.byteLength} bytes  [unsaved changes]`);
+        } catch (e) { this.setStatus('Import failed: ' + e.message, true); }
+        fi.value = '';
+      };
+      fi.click();
+    },
+  };
+}
+
+let openDD = null;
+
+function closeDropdown() {
+  if (!openDD) return;
+  openDD.remove(); openDD = null;
+  document.removeEventListener('mousedown', ddOutside);
+}
+function ddOutside(e) {
+  if (openDD && !openDD.contains(e.target)) {
+    if (openDD._commit) openDD._commit(); else closeDropdown();
+  }
+}
+
+function placePopover(dd, anchor) {
+  dd._anchor = anchor;
+  // Set fixed inline before measuring: on the first popover, Tailwind's
+  // runtime-compiled .dd class (which supplies position:fixed) may not be
+  // injected yet, leaving the div full-width and pinning it to the left.
+  dd.style.position = 'fixed';
+  document.body.appendChild(dd);
+  const r = anchor.getBoundingClientRect();
+  dd.style.left = Math.max(8, Math.min(r.left, window.innerWidth - dd.offsetWidth - 8)) + 'px';
+  if (window.innerHeight - r.bottom < dd.offsetHeight + 8 && r.top > dd.offsetHeight + 8)
+    dd.style.top = (r.top - dd.offsetHeight - 2) + 'px';
+  else
+    dd.style.top = (r.bottom + 2) + 'px';
+  openDD = dd;
+  document.addEventListener('mousedown', ddOutside);
+}
+
+function showDropdown(anchor, choices, current, onPick) {
+  if (openDD && openDD._anchor === anchor) { closeDropdown(); return; }
+  closeDropdown();
+  const dd = document.createElement('div');
+  dd.className = 'dd'; dd.tabIndex = -1;
+  let act = Math.max(0, choices.indexOf(current));
+  const setAct = i => {
+    dd.children[act].classList.remove('act');
+    act = i; dd.children[act].classList.add('act');
+    dd.children[act].scrollIntoView({block: 'nearest'});
+  };
+  const pick = i => { closeDropdown(); if (choices[i] !== current) onPick(choices[i]); };
+  choices.forEach((c, i) => {
+    const it = document.createElement('div');
+    it.textContent = c;
+    if (c === current) it.classList.add('sel');
+    if (i === act) it.classList.add('act');
+    it.onmouseenter = () => setAct(i);
+    it.onclick = e => { e.stopPropagation(); pick(i); };
+    dd.appendChild(it);
+  });
+  dd.onkeydown = e => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setAct(Math.min(act + 1, choices.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setAct(Math.max(act - 1, 0)); }
+    else if (e.key === 'Enter') { e.preventDefault(); pick(act); }
+    else if (e.key === 'Escape') closeDropdown();
+  };
+  placePopover(dd, anchor);
+  dd.focus();
+  dd.children[act].scrollIntoView({block: 'nearest'});
+}
+
+const normBits = s => s.split(',').map(x => x.trim()).filter(Boolean).sort().join(',');
+
+// Floating in-place editor for text / idstring / float / raw / bitmask values,
+// styled like the enum dropdown. Commits on Enter or click-away, cancels on Escape.
+function showEditPopover(anchor, v, onCommit) {
+  if (openDD && openDD._anchor === anchor) { closeDropdown(); return; }
+  closeDropdown();
+  const dd = document.createElement('div');
+  dd.className = 'dd ddedit'; dd.tabIndex = -1;
+  let getValue, focusEl, changed;
+  if (v.kind === 'bitmask') {
+    const list = document.createElement('div');
+    list.className = 'ddboxes';
+    const boxes = v.choices.map(c => {
+      const lab = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = v.edit.split(',').map(s => s.trim()).includes(c);
+      lab.appendChild(cb); lab.appendChild(document.createTextNode(c));
+      list.appendChild(lab);
+      return [c, cb];
+    });
+    dd.appendChild(list);
+    getValue = () => boxes.filter(([c, cb]) => cb.checked).map(([c]) => c).join(', ');
+    changed = val => normBits(val) !== normBits(v.edit);
+    focusEl = boxes.length ? boxes[0][1] : dd;
+  } else {
+    const inp = document.createElement('input');
+    inp.className = 'field';
+    inp.value = v.edit;
+    inp.style.width = Math.max(180, (v.edit.length + 2) * 8) + 'px';
+    if (v.kind === 'idstring') inp.title =
+      'Enter a string to hash, or a 16-digit hex hash';
+    dd.appendChild(inp);
+    getValue = () => inp.value;
+    changed = val => val !== v.edit;
+    focusEl = inp;
+  }
+  const commit = () => { const val = getValue(); closeDropdown();
+                         if (changed(val)) onCommit(val); };
+  dd._commit = commit;
+  dd.onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeDropdown(); }
+  };
+  placePopover(dd, anchor);
+  setTimeout(() => { focusEl.focus(); if (focusEl.select) focusEl.select(); });
+}
+
+</script>
+</body></html>

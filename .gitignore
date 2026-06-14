@@ -1,0 +1,13 @@
+# Hashlist and its derived cache (large, user-supplied)
+hashlist
+*.cache
+
+# Runtime user settings (last file/directory)
+pd2_shader_gui.json
+
+# Input shader packages
+*.shaders
+
+# Python
+__pycache__/
+*.py[cod]
