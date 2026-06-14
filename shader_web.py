@@ -2,7 +2,7 @@
 """Browser-based editor for PAYDAY 2 / Diesel engine .shaders packages.
 
 Runs a local web server (127.0.0.1 only) and opens the UI in your browser.
-Works with the stock macOS Python - no dependencies, no Tk required.
+Works with the stock Python 3 - no dependencies, no Tk required.
 
 Usage:
     python3 shader_web.py [file.shaders]

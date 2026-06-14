@@ -56,6 +56,9 @@
     #tabbody th        { @apply text-dim font-medium; }
   }
 
+  /* Lock the viewport so Safari can't rubber-band the page; inner panels scroll */
+  html, body { height:100%; overflow:hidden; overscroll-behavior:none; }
+
   /* Leftovers @apply can't express: pseudo-element content, <mark>, status colour */
   .pass.dirty::before     { content:"* "; color:#e8a33d; }
   .pass.sel.dirty::before { color:#7a4a00; }

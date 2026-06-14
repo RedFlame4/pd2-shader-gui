@@ -2,7 +2,7 @@
 
 GUI editor for PAYDAY 2 / Diesel engine `.shaders` packages (e.g.
 `old_deferred_lighting_latest.shaders`). Parse, inspect, edit and repack —
-no dependencies beyond the stock macOS Python 3.
+no dependencies beyond the stock Python 3.
 
 ## Run it
 
