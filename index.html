@@ -70,6 +70,7 @@
   #status.err { color:#ff7b72; }
   [x-cloak] { display:none; }
 </style>
+<script defer src="/static/anchor.min.js"></script>
 <script defer src="/static/alpine.min.js"></script>
 </head>
 <body class="h-screen flex flex-col bg-bg text-fg text-[13px] leading-[1.45] font-sans"
@@ -115,7 +116,7 @@
       </template>
     </div>
 
-    <div id="tabbody" class="flex-1 overflow-auto p-3" @scroll="closeDropdown()">
+    <div id="tabbody" class="flex-1 overflow-auto p-3" @scroll="closePop()">
       <template x-if="!detail"><div class="empty">Select a shader pass</div></template>
 
       <!-- State vars -->
@@ -141,26 +142,22 @@
       <template x-if="detail && curTab === 'tex'">
         <div>
           <template x-if="!detail.textures.length"><div class="empty">No texture blocks</div></template>
-          <template x-if="detail.textures.length">
-            <div>
-              <table>
-                <thead><tr><th>ID</th><th>Name</th><th>Value</th></tr></thead>
-                <template x-for="(b, bi) in detail.textures" :key="bi">
-                  <tbody>
-                    <tr class="texhead"><td colspan="3" x-text="b.label"></td></tr>
-                    <template x-for="(v, vi) in b.vars" :key="vi">
-                      <tr>
-                        <td x-text="v.id"></td>
-                        <td x-text="v.name"></td>
-                        <td class="val" @click="editValue($event.currentTarget, 'tex', bi, vi)" x-text="v.value"></td>
-                      </tr>
-                    </template>
-                  </tbody>
+          <table x-show="detail.textures.length">
+            <thead><tr><th>ID</th><th>Name</th><th>Value</th></tr></thead>
+            <template x-for="(b, bi) in detail.textures" :key="bi">
+              <tbody>
+                <tr class="texhead"><td colspan="3" x-text="b.label"></td></tr>
+                <template x-for="(v, vi) in b.vars" :key="vi">
+                  <tr>
+                    <td x-text="v.id"></td>
+                    <td x-text="v.name"></td>
+                    <td class="val" @click="editValue($event.currentTarget, 'tex', bi, vi)" x-text="v.value"></td>
+                  </tr>
                 </template>
-              </table>
-              <p class="hint">Click a value to edit</p>
-            </div>
-          </template>
+              </tbody>
+            </template>
+          </table>
+          <p class="hint" x-show="detail.textures.length">Click a value to edit</p>
         </div>
       </template>
 
@@ -191,10 +188,45 @@
      :class="{err: statusErr}" x-text="statusMsg">Ready</div>
 <input type="file" id="blobfile" class="hidden">
 
+<!-- Value popover: enum dropdown or in-place editor. Recreated per-open (x-if)
+     so x-anchor binds to the current anchor cell; flip+shift keep it on-screen. -->
+<template x-if="pop.open">
+  <div x-ref="pop" tabindex="-1"
+       class="dd" :class="{ddedit: pop.mode === 'edit'}"
+       x-anchor.bottom-start.offset.2="pop.anchor"
+       @keydown.arrow-down="popDown($event)" @keydown.arrow-up="popUp($event)"
+       @keydown.enter.prevent="popEnter()" @keydown.escape.prevent="closePop()">
+    <!-- enum dropdown -->
+    <template x-for="(c, i) in (pop.mode === 'enum' ? pop.choices : [])" :key="i">
+      <div :class="{act: i === pop.act, sel: c === pop.current}"
+           @mouseenter="pop.act = i" @click.stop="popPick(i)" x-text="c"></div>
+    </template>
+    <!-- bitmask checkboxes -->
+    <template x-if="pop.mode === 'edit' && pop.kind === 'bitmask'">
+      <div class="ddboxes">
+        <template x-for="(c, i) in pop.checks" :key="i">
+          <label><input type="checkbox" x-model="c.checked"><span x-text="c.label"></span></label>
+        </template>
+      </div>
+    </template>
+    <!-- text / idstring / float / raw input -->
+    <template x-if="pop.mode === 'edit' && pop.kind !== 'bitmask'">
+      <input class="field" x-model="pop.text" :title="pop.title"
+             :style="{width: Math.max(180, (pop.text.length + 2) * 8) + 'px'}">
+    </template>
+  </div>
+</template>
+
 <script>
 const isMac = navigator.platform.toUpperCase().includes('MAC');
 function esc(s) { const d = document.createElement('span');
   d.textContent = s; return d.innerHTML; }
+
+// Memoised find results, shared by highlightedAsm/findLabel/findStep so they
+// don't each rescan the asm. `detail` is reassigned on every pass select/edit/
+// import, so identity + tab + query is a sufficient cache key. Kept outside
+// Alpine state so writing it during render doesn't trigger reactivity.
+let matchCache = {detail: null, tab: null, q: null, list: []};
 
 function app() {
   return {
@@ -206,10 +238,22 @@ function app() {
     pathInput: '', isMac,
     statusMsg: 'Ready', statusErr: false,
     findQ: '', findIdx: 0,
+    // Value popover (enum dropdown or in-place editor); see openEnum/openEdit.
+    pop: {open: false, mode: null, kind: null, choices: [], checks: [],
+          text: '', title: '', act: 0, current: null, v: null,
+          anchor: null, onPick: null},
     tabs: [{id: 'sv', label: 'State Vars'}, {id: 'tex', label: 'Textures'},
            {id: 'vs', label: 'Vertex Shader'}, {id: 'ps', label: 'Pixel Shader'}],
 
     init() {
+      // Mousedown outside the popover commits an editor / closes a dropdown.
+      // Ignore the current anchor cell: mousedown precedes its click, so let
+      // the click's popToggle() close it (re-clicking a cell toggles it shut).
+      this._popOutside = e => {
+        if (this.pop.open && this.$refs.pop && !this.$refs.pop.contains(e.target)
+            && !(this.pop.anchor && this.pop.anchor.contains(e.target)))
+          this.popAway();
+      };
       window.addEventListener('beforeunload', e => {
         if (this.dirty) { e.preventDefault(); e.returnValue = ''; }
       });
@@ -254,14 +298,104 @@ function app() {
       this.detail = await this.api('/api/pass/' + ref);
     },
 
-    // --- value editing (popovers live as standalone DOM widgets below) ---
+    // --- value editing (popover markup lives in the body, driven by this.pop) ---
     editValue(td, scope, tex, index) {
       const v = scope === 'sv' ? this.detail.state_vars[index]
                                : this.detail.textures[tex].vars[index];
-      if (v.kind === 'enum')
-        showDropdown(td, v.choices, v.edit, val => this.applyVar(scope, tex, index, val));
-      else
-        showEditPopover(td, v, val => this.applyVar(scope, tex, index, val));
+      const onPick = val => this.applyVar(scope, tex, index, val);
+      if (v.kind === 'enum') this.openEnum(td, v.choices, v.edit, onPick);
+      else this.openEdit(td, v, onPick);
+    },
+    openEnum(anchor, choices, current, onPick) {
+      if (this.popToggle(anchor)) return;
+      Object.assign(this.pop, {open: true, mode: 'enum', kind: null, choices,
+        current, act: Math.max(0, choices.indexOf(current)), v: null,
+        checks: [], text: '', title: '', anchor, onPick});
+      this.openPop();
+    },
+    openEdit(anchor, v, onPick) {
+      const checks = v.kind === 'bitmask'
+        ? v.choices.map(c => ({label: c,
+            checked: v.edit.split(',').map(s => s.trim()).includes(c)}))
+        : [];
+      if (this.popToggle(anchor)) return;
+      Object.assign(this.pop, {open: true, mode: 'edit', kind: v.kind, v,
+        choices: [], current: null, act: 0, checks,
+        text: v.kind === 'bitmask' ? '' : v.edit,
+        title: v.kind === 'idstring'
+          ? 'Enter a string to hash, or a 16-digit hex hash' : '',
+        anchor, onPick});
+      this.openPop();
+    },
+    // Re-clicking the same anchor toggles the popover shut, committing any
+    // in-progress edit (like clicking away) instead of discarding it. When a
+    // different cell is clicked, _popOutside already closed/committed the old
+    // popover, so pop.open is false here and we just no-op.
+    popToggle(anchor) {
+      const same = this.pop.open && this.pop.anchor === anchor;
+      if (this.pop.open) this.popAway(); else this.closePop();
+      return same;
+    },
+    // x-anchor (Floating UI) positions the popover; we just focus it once shown.
+    openPop() {
+      document.addEventListener('mousedown', this._popOutside);
+      this.$nextTick(() => {
+        const el = this.$refs.pop;
+        if (!el) return;
+        el.focus();
+        if (this.pop.mode === 'enum') { this.scrollAct(); return; }
+        const f = el.querySelector('input');
+        if (f) { f.focus(); if (f.select) f.select(); }
+      });
+    },
+    closePop() {
+      this.pop.open = false;
+      this.pop.anchor = null;
+      document.removeEventListener('mousedown', this._popOutside);
+    },
+    scrollAct() {
+      this.$nextTick(() => {
+        const a = this.$refs.pop && this.$refs.pop.querySelector('div.act');
+        if (a) a.scrollIntoView({block: 'nearest'});
+      });
+    },
+    popDown(e) {
+      if (this.pop.mode !== 'enum') return;
+      e.preventDefault();
+      this.pop.act = Math.min(this.pop.act + 1, this.pop.choices.length - 1);
+      this.scrollAct();
+    },
+    popUp(e) {
+      if (this.pop.mode !== 'enum') return;
+      e.preventDefault();
+      this.pop.act = Math.max(this.pop.act - 1, 0);
+      this.scrollAct();
+    },
+    popEnter() {
+      if (this.pop.mode === 'enum') this.popPick(this.pop.act);
+      else this.commitEdit();
+    },
+    popPick(i) {
+      const c = this.pop.choices[i], cur = this.pop.current, cb = this.pop.onPick;
+      this.closePop();
+      if (c !== cur) cb(c);
+    },
+    commitEdit() {
+      const v = this.pop.v, cb = this.pop.onPick;
+      let val, changed;
+      if (this.pop.kind === 'bitmask') {
+        val = this.pop.checks.filter(c => c.checked).map(c => c.label).join(', ');
+        changed = normBits(val) !== normBits(v.edit);
+      } else {
+        val = this.pop.text;
+        changed = val !== v.edit;
+      }
+      this.closePop();
+      if (changed) cb(val);
+    },
+    popAway() {
+      if (this.pop.mode === 'edit') this.commitEdit();
+      else this.closePop();
     },
     async applyVar(scope, tex, index, value) {
       try {
@@ -275,11 +409,14 @@ function app() {
     // --- disassembly find/highlight ---
     matches() {
       if (!this.detail || !this.findQ) return [];
+      if (matchCache.detail === this.detail && matchCache.tab === this.curTab
+          && matchCache.q === this.findQ) return matchCache.list;
       const hay = this.detail[this.curTab].asm.toLowerCase();
       const needle = this.findQ.toLowerCase();
       const out = [];
       for (let at = hay.indexOf(needle); at !== -1; at = hay.indexOf(needle, at + needle.length))
         out.push(at);
+      matchCache = {detail: this.detail, tab: this.curTab, q: this.findQ, list: out};
       return out;
     },
     highlightedAsm() {
@@ -382,116 +519,7 @@ function app() {
   };
 }
 
-let openDD = null;
-
-function closeDropdown() {
-  if (!openDD) return;
-  openDD.remove(); openDD = null;
-  document.removeEventListener('mousedown', ddOutside);
-}
-function ddOutside(e) {
-  if (openDD && !openDD.contains(e.target)) {
-    if (openDD._commit) openDD._commit(); else closeDropdown();
-  }
-}
-
-function placePopover(dd, anchor) {
-  dd._anchor = anchor;
-  // Set fixed inline before measuring: on the first popover, Tailwind's
-  // runtime-compiled .dd class (which supplies position:fixed) may not be
-  // injected yet, leaving the div full-width and pinning it to the left.
-  dd.style.position = 'fixed';
-  document.body.appendChild(dd);
-  const r = anchor.getBoundingClientRect();
-  dd.style.left = Math.max(8, Math.min(r.left, window.innerWidth - dd.offsetWidth - 8)) + 'px';
-  if (window.innerHeight - r.bottom < dd.offsetHeight + 8 && r.top > dd.offsetHeight + 8)
-    dd.style.top = (r.top - dd.offsetHeight - 2) + 'px';
-  else
-    dd.style.top = (r.bottom + 2) + 'px';
-  openDD = dd;
-  document.addEventListener('mousedown', ddOutside);
-}
-
-function showDropdown(anchor, choices, current, onPick) {
-  if (openDD && openDD._anchor === anchor) { closeDropdown(); return; }
-  closeDropdown();
-  const dd = document.createElement('div');
-  dd.className = 'dd'; dd.tabIndex = -1;
-  let act = Math.max(0, choices.indexOf(current));
-  const setAct = i => {
-    dd.children[act].classList.remove('act');
-    act = i; dd.children[act].classList.add('act');
-    dd.children[act].scrollIntoView({block: 'nearest'});
-  };
-  const pick = i => { closeDropdown(); if (choices[i] !== current) onPick(choices[i]); };
-  choices.forEach((c, i) => {
-    const it = document.createElement('div');
-    it.textContent = c;
-    if (c === current) it.classList.add('sel');
-    if (i === act) it.classList.add('act');
-    it.onmouseenter = () => setAct(i);
-    it.onclick = e => { e.stopPropagation(); pick(i); };
-    dd.appendChild(it);
-  });
-  dd.onkeydown = e => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); setAct(Math.min(act + 1, choices.length - 1)); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); setAct(Math.max(act - 1, 0)); }
-    else if (e.key === 'Enter') { e.preventDefault(); pick(act); }
-    else if (e.key === 'Escape') closeDropdown();
-  };
-  placePopover(dd, anchor);
-  dd.focus();
-  dd.children[act].scrollIntoView({block: 'nearest'});
-}
-
 const normBits = s => s.split(',').map(x => x.trim()).filter(Boolean).sort().join(',');
-
-// Floating in-place editor for text / idstring / float / raw / bitmask values,
-// styled like the enum dropdown. Commits on Enter or click-away, cancels on Escape.
-function showEditPopover(anchor, v, onCommit) {
-  if (openDD && openDD._anchor === anchor) { closeDropdown(); return; }
-  closeDropdown();
-  const dd = document.createElement('div');
-  dd.className = 'dd ddedit'; dd.tabIndex = -1;
-  let getValue, focusEl, changed;
-  if (v.kind === 'bitmask') {
-    const list = document.createElement('div');
-    list.className = 'ddboxes';
-    const boxes = v.choices.map(c => {
-      const lab = document.createElement('label');
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = v.edit.split(',').map(s => s.trim()).includes(c);
-      lab.appendChild(cb); lab.appendChild(document.createTextNode(c));
-      list.appendChild(lab);
-      return [c, cb];
-    });
-    dd.appendChild(list);
-    getValue = () => boxes.filter(([c, cb]) => cb.checked).map(([c]) => c).join(', ');
-    changed = val => normBits(val) !== normBits(v.edit);
-    focusEl = boxes.length ? boxes[0][1] : dd;
-  } else {
-    const inp = document.createElement('input');
-    inp.className = 'field';
-    inp.value = v.edit;
-    inp.style.width = Math.max(180, (v.edit.length + 2) * 8) + 'px';
-    if (v.kind === 'idstring') inp.title =
-      'Enter a string to hash, or a 16-digit hex hash';
-    dd.appendChild(inp);
-    getValue = () => inp.value;
-    changed = val => val !== v.edit;
-    focusEl = inp;
-  }
-  const commit = () => { const val = getValue(); closeDropdown();
-                         if (changed(val)) onCommit(val); };
-  dd._commit = commit;
-  dd.onkeydown = e => {
-    if (e.key === 'Enter') { e.preventDefault(); commit(); }
-    else if (e.key === 'Escape') { e.preventDefault(); closeDropdown(); }
-  };
-  placePopover(dd, anchor);
-  setTimeout(() => { focusEl.focus(); if (focusEl.select) focusEl.select(); });
-}
 
 </script>
 </body></html>

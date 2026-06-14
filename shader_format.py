@@ -5,6 +5,7 @@ ByteBufferUtils.kt). Saving an unmodified package is byte-identical to
 the input.
 """
 
+import math
 import struct
 
 TYPE_SHADER = 0x7F3552D1
@@ -301,7 +302,11 @@ class SVDef:
         if self.arg_type == ArgType.INT:
             return str(v)
         if self.arg_type == ArgType.FLOAT:
-            return repr(struct.unpack("<f", struct.pack("<I", v))[0])
+            # Non-finite bit patterns (e.g. 0xffffffff -> nan) aren't editable
+            # as floats and would lose their exact bits on re-commit; let the
+            # caller fall back to a raw hex view that round-trips losslessly.
+            f = struct.unpack("<f", struct.pack("<I", v))[0]
+            return repr(f) if math.isfinite(f) else None
         if self.arg_type == ArgType.ENUM:
             if 0 <= v < len(self.values) and self.values[v] is not None:
                 return self.values[v]

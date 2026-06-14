@@ -179,9 +179,10 @@ class Session:
             out["choices"] = list(sdef.values)
             out["edit"] = sdef.decode(sv)
         elif sdef and sdef.arg_type == ArgType.FLOAT and \
-                fourcc_or_none(sv.val4) is None:
+                fourcc_or_none(sv.val4) is None and \
+                (fval := sdef.decode(sv)) is not None:
             out["kind"] = "float"
-            out["edit"] = sdef.decode(sv)
+            out["edit"] = fval
         else:
             out["kind"] = "raw"
             fcc = fourcc_or_none(sv.val4)
