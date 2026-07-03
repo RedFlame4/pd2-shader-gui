@@ -231,7 +231,7 @@ let matchCache = {detail: null, tab: null, q: null, list: []};
 function app() {
   return {
     // --- reactive state ---
-    file: null, dirty: false, lastFile: null,
+    file: null, dirty: false, lastFile: null, layout: null,
     counts: {templates: 0, passes: 0}, hashlist: {path: null, count: 0},
     tree: [], open: {},
     detail: null, curRef: null, curTab: 'sv',
@@ -274,6 +274,7 @@ function app() {
     applyStateFrom(s) {
       this.file = s.file; this.dirty = s.dirty;
       this.counts = s.counts || {templates: 0, passes: 0};
+      this.layout = s.layout || null;
       this.hashlist = s.hashlist || {path: null, count: 0};
       this.tree = s.tree || [];
     },
@@ -281,8 +282,9 @@ function app() {
       const s = await this.api('/api/state');
       this.applyStateFrom(s);
       this.lastFile = s.last_file;
+      const layoutLabel = {d3d9: 'D3D9', d3d11: 'D3D11', mixed: 'mixed D3D9/D3D11'}[this.layout];
       let line = this.file
-        ? `${this.file} — ${this.counts.templates} render templates, ${this.counts.passes} passes`
+        ? `${this.file} — ${layoutLabel ? layoutLabel + ', ' : ''}${this.counts.templates} render templates, ${this.counts.passes} passes`
         : 'No file loaded';
       if (this.file) line += this.hashlist.count
         ? ` — hashlist: ${this.hashlist.count} names`

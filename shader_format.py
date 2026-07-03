@@ -111,35 +111,74 @@ class StateVar:
 
 
 class TextureBlock:
-    """Sampler names live in the bytecode's CTAB constant table."""
+    """A per-sampler block of state vars.
 
-    def __init__(self, ukn_i, svars):
-        self.ukn_i = ukn_i
+    In D3D9 passes `tex_id` is a small "unknown int" (a sampler-stage
+    register index); sampler names live in the bytecode's CTAB constant
+    table instead. In D3D11 passes there is no CTAB to recover names from
+    (bytecode is DXBC/SM4-5), so `tex_id` is instead the full 8-byte Idstring
+    hash of the sampler/texture variable name (resolvable via the hashlist,
+    same as render-template/mode names).
+    """
+
+    def __init__(self, tex_id, svars):
+        self.tex_id = tex_id
         self.vars = svars
 
 
+def _looks_like_shader_blob(blob):
+    """True if `blob` starts like D3D9 SM1-3 bytecode, DXBC (D3D10/11), or is empty."""
+    if len(blob) == 0:
+        return True
+    if blob[:4] == b"DXBC":
+        return True
+    if len(blob) >= 4:
+        tok = struct.unpack_from("<I", blob, 0)[0]
+        if (tok >> 16) in (0xFFFE, 0xFFFF):
+            return True
+    return False
+
+
 class ObjShaderPass:
+    """`layout` is "d3d9" (raw D3DRENDERSTATETYPE ids, int texture-block
+    header) or "d3d11" (Diesel's own compact D3D11 state-var ids, Idstring
+    texture-block header); detected on load from the texture-block/bytecode
+    shape since both share the same outer container format."""
+
     def __init__(self, hdr):
         self.hdr = hdr
         self.state_vars = []
         self.textures = []
         self.vertex_shader = b""
         self.fragment_shader = b""
+        self.layout = "d3d9"
 
     def load(self, r, ref_map):
         self.state_vars = [StateVar.load(r) for _ in range(r.u32())]
 
-        self.textures = []
-        for _ in range(r.u32()):
-            ukn_i = r.i32()
-            svars = [StateVar.load(r) for _ in range(r.u32())]
-            self.textures.append(TextureBlock(ukn_i, svars))
+        tex_start = r.pos
+        for layout in ("d3d9", "d3d11"):
+            r.pos = tex_start
+            try:
+                textures = []
+                for _ in range(r.u32()):
+                    tex_id = r.u64() if layout == "d3d11" else r.i32()
+                    svars = [StateVar.load(r) for _ in range(r.u32())]
+                    textures.append(TextureBlock(tex_id, svars))
+                vertex_shader = r.len_array()
+                fragment_shader = r.len_array()
+            except ValueError:
+                continue
+            if r.pos == r.end and _looks_like_shader_blob(vertex_shader) \
+                    and _looks_like_shader_blob(fragment_shader):
+                self.layout = layout
+                self.textures = textures
+                self.vertex_shader = vertex_shader
+                self.fragment_shader = fragment_shader
+                return
 
-        self.vertex_shader = r.len_array()
-        self.fragment_shader = r.len_array()
-        if r.pos != r.end:
-            raise ValueError("Shader pass refId=%d: trailing data"
-                             % self.hdr.ref_id)
+        raise ValueError("Shader pass refId=%d: unrecognised texture-block "
+                         "layout (not D3D9 or D3D11)" % self.hdr.ref_id)
 
     def save(self, w):
         w.u32(len(self.state_vars))
@@ -148,7 +187,10 @@ class ObjShaderPass:
 
         w.u32(len(self.textures))
         for block in self.textures:
-            w.i32(block.ukn_i)
+            if self.layout == "d3d11":
+                w.u64(block.tex_id)
+            else:
+                w.i32(block.tex_id)
             w.u32(len(block.vars))
             for sv in block.vars:
                 sv.save(w)
@@ -497,8 +539,23 @@ SV_TYPES_TEX_D3D = {
 }
 
 
+# D3D11-layout files: state var IDs are *not* raw D3D11 API values (D3D11 has
+# no per-state setter like D3D9's SetRenderState - states are grouped into
+# immutable rasterizer/depth-stencil/blend descriptor objects). These are
+# instead a compact, engine-specific id space Diesel uses for its D3D11
+# backend (observed range in deferred_lighting.d3d11.shaders: 1-46, texture
+# vars 0-13). The exact id->field mapping hasn't been recovered, so these
+# tables are intentionally left empty - values still round-trip losslessly
+# and display/edit as raw numbers (see describe_state_var's "id %d" fallback)
+# rather than risk asserting an incorrect semantic name.
+SV_TYPES_D3D11 = {}
+SV_TYPES_TEX_D3D11 = {}
+
+
 def tables_for_pass(shader_pass):
     """(state var table, texture var table) appropriate for a pass's layout."""
+    if getattr(shader_pass, "layout", "d3d9") == "d3d11":
+        return SV_TYPES_D3D11, SV_TYPES_TEX_D3D11
     return SV_TYPES_D3D, SV_TYPES_TEX_D3D
 
 

@@ -22,6 +22,12 @@ from shader_format import (ShaderPackage, ObjShaderPass, ArgType,
                            parse_var_value, fourcc_or_none)
 from diesel_hash import HashList, diesel_hash
 import d3d9_disasm
+import d3d11_disasm
+
+
+def disasm_for_pass(p):
+    """The disassembler module matching a pass's bytecode layout."""
+    return d3d11_disasm if p.layout == "d3d11" else d3d9_disasm
 
 
 # --- config + hashlist helpers ---
@@ -151,11 +157,14 @@ class Session:
                     } for i, p in enumerate(passes)],
                 })
             tree.append({"name": self.name_of(h), "modes": modes})
-        n_passes = sum(isinstance(o, ObjShaderPass) for o in self.package.objects)
+        pass_objs = [o for o in self.package.objects if isinstance(o, ObjShaderPass)]
+        layouts = {p.layout for p in pass_objs}
+        layout = layouts.pop() if len(layouts) == 1 else "mixed"
         return {"file": self.file_path, "dirty": self.dirty,
                 "hashlist": self._hashlist_info(), "tree": tree,
                 "counts": {"templates": len(lib.render_templates),
-                           "passes": n_passes}}
+                           "passes": len(pass_objs)},
+                "layout": layout}
 
     def _hashlist_info(self):
         return {"path": self.hashlist.path, "count": len(self.hashlist)}
@@ -194,29 +203,42 @@ class Session:
         sv_table, tex_table = tables_for_pass(p)
         state_vars = [self._var_json(sv, sv_table.get(sv.id), sv_table)
                       for sv in p.state_vars]
-        ps_samplers = d3d9_disasm.sampler_names(p.fragment_shader)
-        vs_samplers = d3d9_disasm.sampler_names(p.vertex_shader)
+        disasm = disasm_for_pass(p)
         textures = []
-        for block in p.textures:
-            if block.ukn_i in ps_samplers:
-                label = "s%d — %s" % (block.ukn_i, ps_samplers[block.ukn_i])
-            elif block.ukn_i in vs_samplers:
-                label = "s%d — %s (vertex)" % (block.ukn_i, vs_samplers[block.ukn_i])
-            else:
-                label = "sampler %d" % block.ukn_i
-            textures.append({
-                "label": label,
-                "vars": [self._var_json(sv, tex_table.get(sv.id), tex_table)
-                         for sv in block.vars],
-            })
+        if p.layout == "d3d11":
+            # tex_id is the sampler/texture variable's own Idstring hash
+            # (no per-shader CTAB to resolve names from - see TextureBlock).
+            for block in p.textures:
+                label = "%s (%016x)" % (self.name_of(block.tex_id), block.tex_id)
+                textures.append({
+                    "label": label,
+                    "vars": [self._var_json(sv, tex_table.get(sv.id), tex_table)
+                             for sv in block.vars],
+                })
+        else:
+            ps_samplers = disasm.sampler_names(p.fragment_shader)
+            vs_samplers = disasm.sampler_names(p.vertex_shader)
+            for block in p.textures:
+                if block.tex_id in ps_samplers:
+                    label = "s%d — %s" % (block.tex_id, ps_samplers[block.tex_id])
+                elif block.tex_id in vs_samplers:
+                    label = "s%d — %s (vertex)" % (block.tex_id, vs_samplers[block.tex_id])
+                else:
+                    label = "sampler %d" % block.tex_id
+                textures.append({
+                    "label": label,
+                    "vars": [self._var_json(sv, tex_table.get(sv.id), tex_table)
+                             for sv in block.vars],
+                })
         return {
             "ref": ref_id,
+            "layout": p.layout,
             "state_vars": state_vars,
             "textures": textures,
             "vs": {"size": len(p.vertex_shader),
-                   "asm": d3d9_disasm.disassemble(p.vertex_shader)},
+                   "asm": disasm.disassemble(p.vertex_shader)},
             "ps": {"size": len(p.fragment_shader),
-                   "asm": d3d9_disasm.disassemble(p.fragment_shader)},
+                   "asm": disasm.disassemble(p.fragment_shader)},
         }
 
     def set_var(self, ref_id, scope, tex_index, var_index, text):
@@ -268,12 +290,13 @@ class Session:
                 for i, p in enumerate(passes):
                     d = os.path.join(out_dir, t_name, m_name)
                     os.makedirs(d, exist_ok=True)
+                    disasm = disasm_for_pass(p)
                     for suffix, blob in (("vsb", p.vertex_shader),
                                          ("psb", p.fragment_shader)):
                         with open(os.path.join(d, "pass%d.%s" % (i, suffix)), "wb") as f:
                             f.write(blob)
                         with open(os.path.join(d, "pass%d.%s.asm" % (i, suffix)), "w") as f:
-                            f.write(d3d9_disasm.disassemble(blob))
+                            f.write(disasm.disassemble(blob))
                         count += 1
         return count
 
