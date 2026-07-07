@@ -541,15 +541,59 @@ SV_TYPES_TEX_D3D = {
 
 # D3D11-layout files: state var IDs are *not* raw D3D11 API values (D3D11 has
 # no per-state setter like D3D9's SetRenderState - states are grouped into
-# immutable rasterizer/depth-stencil/blend descriptor objects). These are
+# immutable rasterizer/depth-stencil/blend descriptor objects). They are
 # instead a compact, engine-specific id space Diesel uses for its D3D11
-# backend (observed range in deferred_lighting.d3d11.shaders: 1-46, texture
-# vars 0-13). The exact id->field mapping hasn't been recovered, so these
-# tables are intentionally left empty - values still round-trip losslessly
-# and display/edit as raw numbers (see describe_state_var's "id %d" fallback)
-# rather than risk asserting an incorrect semantic name.
-SV_TYPES_D3D11 = {}
-SV_TYPES_TEX_D3D11 = {}
+# backend (observed range in deferred_lighting.d3d11.shaders: 1-46).
+#
+# The mapping below was recovered by diffing deferred_lighting.d3d11.shaders
+# against deferred_lighting.d3d9.shaders: 30 passes exist in both files under
+# the same (render-template, mode, pass-index) keys, and each pass emits its
+# state vars in the *same* canonical order in both backends. Positional
+# alignment across those passes yields an unambiguous d11-id -> d9-id mapping
+# (every id votes unanimously)
+#
+# The recovered ids cluster exactly as the descriptor grouping predicts:
+# rasterizer/misc in 1-5, depth-stencil in 10-24, blend in 29-46. Only the 22
+# states actually used by deferred_lighting are known; other ids in the space
+# are simply never set here. Names/types/enums are single-sourced from the
+# D3D9 tables via this remap so the two stay in sync.
+_D3D11_TO_D3D9 = {
+    1: 22,    # CullMode
+    3: 194,   # SRGBWriteEnable
+    5: 206,   # SeparateAlphaBlendEnable
+    10: 7,    # ZEnable
+    11: 14,   # ZWriteEnable
+    12: 23,   # ZFunc
+    13: 52,   # StencilEnable
+    14: 58,   # StencilMask
+    15: 59,   # StencilWriteMask
+    16: 53,   # StencilFail
+    17: 54,   # StencilZFail
+    18: 55,   # StencilPass
+    19: 56,   # StencilFunc
+    24: 57,   # StencilRef
+    29: 27,   # AlphaBlendEnable
+    37: 19,   # SrcBlend
+    38: 20,   # DestBlend
+    39: 171,  # BlendOp
+    40: 15,   # AlphaTestEnable
+    44: 168,  # ColorWriteEnable
+    45: 190,  # ColorWriteEnable1
+    46: 191,  # ColorWriteEnable2
+}
+SV_TYPES_D3D11 = {d11: SV_TYPES_D3D[d9] for d11, d9 in _D3D11_TO_D3D9.items()}
+
+# Texture/sampler vars: D3D11 sampler descriptors are shaped differently from
+# D3D9's per-state model, so only the address modes are direct matches. id1/id2
+# carry the same D3DTADDRESS enum values as D3D9 AddressU/AddressV. id0 is a
+# *packed* D3D11_FILTER (observed 0x00/0x15/0x55/0x94 = point / linear /
+# anisotropic / comparison-linear) that collapses D3D9's separate
+# Mag/Min/MipFilter, so it has no single-field D3D9 equivalent; id6 and id13
+# appear too rarely to identify. Those are left to the raw-number fallback.
+SV_TYPES_TEX_D3D11 = {
+    1: SV_TYPES_TEX_D3D[1],  # AddressU
+    2: SV_TYPES_TEX_D3D[2],  # AddressV
+}
 
 
 def tables_for_pass(shader_pass):
