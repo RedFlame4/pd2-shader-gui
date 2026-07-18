@@ -126,17 +126,26 @@ class TextureBlock:
         self.vars = svars
 
 
-def _looks_like_shader_blob(blob):
-    """True if `blob` starts like D3D9 SM1-3 bytecode, DXBC (D3D10/11), or is empty."""
-    if len(blob) == 0:
-        return True
-    if blob[:4] == b"DXBC":
-        return True
+def _blob_kind(blob):
+    """Classify a bytecode blob by its magic:
+
+    "d3d11" for DXBC (D3D10/11, SM4-5), "d3d9" for a D3D9 SM1-3 version token,
+    or None when empty/unrecognised. The DXBC magic ('DXBC' = 0x43425844) is
+    the authoritative D3D11-vs-D3D9 signal, since both layouts share the same
+    outer container and a D3D11 pass can otherwise parse cleanly as D3D9.
+    """
     if len(blob) >= 4:
+        if blob[:4] == b"DXBC":
+            return "d3d11"
         tok = struct.unpack_from("<I", blob, 0)[0]
         if (tok >> 16) in (0xFFFE, 0xFFFF):
-            return True
-    return False
+            return "d3d9"
+    return None
+
+
+def _looks_like_shader_blob(blob):
+    """True if `blob` starts like D3D9 SM1-3 bytecode, DXBC (D3D10/11), or is empty."""
+    return len(blob) == 0 or _blob_kind(blob) is not None
 
 
 class ObjShaderPass:
@@ -156,7 +165,12 @@ class ObjShaderPass:
     def load(self, r, ref_map):
         self.state_vars = [StateVar.load(r) for _ in range(r.u32())]
 
+        # Both layouts share the same outer container, so a D3D11 pass can
+        # parse cleanly as D3D9 (tex_id read as i32 instead of u64) and vice
+        # versa. Collect every layout that parses to the end with valid-looking
+        # bytecode, then let the DXBC magic decide (see _blob_kind).
         tex_start = r.pos
+        candidates = []
         for layout in ("d3d9", "d3d11"):
             r.pos = tex_start
             try:
@@ -171,14 +185,37 @@ class ObjShaderPass:
                 continue
             if r.pos == r.end and _looks_like_shader_blob(vertex_shader) \
                     and _looks_like_shader_blob(fragment_shader):
-                self.layout = layout
-                self.textures = textures
-                self.vertex_shader = vertex_shader
-                self.fragment_shader = fragment_shader
-                return
+                candidates.append((layout, textures, vertex_shader,
+                                   fragment_shader))
 
-        raise ValueError("Shader pass refId=%d: unrecognised texture-block "
-                         "layout (not D3D9 or D3D11)" % self.hdr.ref_id)
+        chosen = self._pick_candidate(candidates)
+        if chosen is None:
+            raise ValueError("Shader pass refId=%d: unrecognised texture-block "
+                             "layout (not D3D9 or D3D11)" % self.hdr.ref_id)
+
+        self.layout, self.textures, self.vertex_shader, self.fragment_shader = \
+            chosen
+
+    @staticmethod
+    def _pick_candidate(candidates):
+        """Choose among successfully-parsed layouts. The bytecode's DXBC/SM
+        magic is authoritative: prefer a candidate whose blob magic matches its
+        layout and never one it contradicts (e.g. DXBC bytecode under a D3D9
+        parse). Falls back to the first clean parse when the blobs are empty
+        and carry no magic."""
+        def kinds(cand):
+            _, _, vs, fs = cand
+            return {k for k in (_blob_kind(vs), _blob_kind(fs)) if k is not None}
+
+        # A candidate whose layout is positively confirmed by the bytecode magic.
+        for cand in candidates:
+            if kinds(cand) == {cand[0]}:
+                return cand
+        # Otherwise, the first candidate not contradicted by its bytecode magic.
+        for cand in candidates:
+            if cand[0] in kinds(cand) or not kinds(cand):
+                return cand
+        return candidates[0] if candidates else None
 
     def save(self, w):
         w.u32(len(self.state_vars))

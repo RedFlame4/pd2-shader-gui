@@ -41,8 +41,10 @@ python3 shader_web.py --selftest file.shaders
 - **State Vars tab** — per-pass render state (depth/stencil/blend/cull…),
   decoded to readable names and values for D3D9 packages. Click a value to
   edit; enums become dropdowns, bitmasks become checkboxes. D3D11 packages
-  use a different, not-yet-reverse-engineered state-var id space; values
-  still show and edit as raw numbers.
+  use a different state-var id space that has been partly reverse-engineered
+  (by diffing shared passes against the D3D9 build): the common
+  depth/stencil/blend/cull states decode to names, but any id not yet
+  identified still shows and edits as a raw number.
 - **Textures tab** — per-sampler settings (filtering, addressing, sRGB…),
   same click-to-edit. Sampler names resolve from the shader's CTAB (D3D9) or
   from the block's own Idstring hash via the hashlist (D3D11).
@@ -54,8 +56,6 @@ python3 shader_web.py --selftest file.shaders
   Sizes are repacked automatically on save.
 - **Export all blobs…** dumps every pass's bytecode plus disassembly to a
   directory tree.
-- **Verify round-trip** proves the writer is lossless: an unedited file saves
-  byte-identical; an edited one must reparse self-consistently.
 - Save never writes a file the parser can't read back.
 
 ## Files
@@ -91,8 +91,12 @@ hash of the sampler/texture variable's name (resolved via the hashlist)
 rather than a small register index, since D3D11 bytecode (DXBC, no CTAB)
 has no equivalent table to recover names from. The per-pass state-var id
 space is also different from D3D9's `D3DRENDERSTATETYPE` — D3D11 has no
-`SetRenderState`-style API, so Diesel uses its own compact ids here; the
-mapping to human-readable names/enums hasn't been reverse-engineered yet, so
-those values round-trip losslessly but display/edit as raw numbers.
+`SetRenderState`-style API, so Diesel uses its own compact ids here. That
+mapping has been partly reverse-engineered (by diffing shared passes against
+the D3D9 build): the common depth/stencil/blend/cull states decode to
+names/enums, while any id not yet identified round-trips losslessly and
+displays/edits as a raw number. The per-sampler var ids are likewise their
+own space, only partly recovered — `AddressU`/`AddressV` decode, but D3D11's
+packed filter and the remaining sampler ids stay raw.
 
 Packages load and save byte-identically in both layouts.

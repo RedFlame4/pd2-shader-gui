@@ -265,20 +265,6 @@ class Session:
             p.fragment_shader = blob
         self.dirty_passes.add(ref_id)
 
-    def verify(self):
-        out = self.package.save()
-        if not self.dirty:
-            ok = out == self.original_bytes
-            return {"ok": ok, "message":
-                    "Byte-identical to the file on disk (%d bytes)." % len(out)
-                    if ok else "Output differs from the original file!"}
-        check = ShaderPackage()
-        check.load(out)
-        ok = check.save() == out
-        return {"ok": ok, "message":
-                "File has edits; output reparses cleanly and is self-consistent "
-                "(%d bytes)." % len(out) if ok else "Output is not self-consistent!"}
-
     def export_all(self, out_dir):
         out_dir = os.path.expanduser(out_dir)
         lib = self.package.find_library()
@@ -400,8 +386,6 @@ class Handler(BaseHTTPRequestHandler):
                 SESSION.set_blob(ref, q["which"][0], self._body())
                 self._json({"ok": True, "detail": SESSION.pass_detail(ref),
                             "state": SESSION.state()})
-            elif url.path == "/api/verify":
-                self._json(SESSION.verify())
             elif url.path == "/api/export_all":
                 count = SESSION.export_all(self._body_json()["dir"])
                 self._json({"ok": True,

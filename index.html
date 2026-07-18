@@ -82,7 +82,6 @@
   <button class="btn" @click="openFile()">Open</button>
   <button class="btn" @click="saveFile(false)">Save</button>
   <button class="btn" @click="saveFile(true)">Save As…</button>
-  <button class="btn" @click="verify()">Verify round-trip</button>
   <button class="btn" @click="exportAll()">Export all blobs…</button>
 </header>
 <div class="flex flex-1 min-h-0">
@@ -483,13 +482,6 @@ function app() {
         const r = await this.api('/api/save', {method: 'POST', body: JSON.stringify({path})});
         this.applyStateFrom(r.state); this.setStatus(r.message);
       } catch (e) { this.setStatus('Save failed: ' + e.message, true); }
-    },
-    async verify() {
-      if (!this.file) return;
-      try {
-        const r = await this.api('/api/verify', {method: 'POST'});
-        this.setStatus(r.message, !r.ok);
-      } catch (e) { this.setStatus('Verify failed: ' + e.message, true); }
     },
     async exportAll() {
       if (!this.file) return;
