@@ -1,8 +1,10 @@
 """Parser/serializer for Diesel engine .shaders packages (PAYDAY 2).
 
 Port of payday2-shader-tool (ShaderPackage.kt, PersistentObject.kt,
-ByteBufferUtils.kt). Saving an unmodified package is byte-identical to
-the input.
+ByteBufferUtils.kt). Saving an unmodified package is byte-identical to the
+input, except that the leading file-size header is recomputed rather than
+preserved (see ShaderPackage), so a file that arrived with a stale size is
+corrected on save.
 """
 
 import math
@@ -195,6 +197,10 @@ class ObjShaderPass:
 
         self.layout, self.textures, self.vertex_shader, self.fragment_shader = \
             chosen
+        # Trying each layout leaves the reader wherever the last attempt
+        # stopped (mid-object if it raised); every accepted candidate consumed
+        # the object exactly, so rewind to the chosen parse's end.
+        r.pos = r.end
 
     @staticmethod
     def _pick_candidate(candidates):
@@ -298,18 +304,34 @@ class ObjectHeader:
 
 
 class ShaderPackage:
+    """Files normally open with a -1 marker followed by a u32 holding the
+    total file size (the prefix counts towards its own size); `has_size_header`
+    records whether this one did, and the size itself is recomputed on save.
+
+    Confirmed against an unmodified shaders file, where it matched
+    the file length exactly. Files that have been through an editing
+    tool carry a stale value, since both the original payday2-shader-tool
+    and earlier versions of this code wrote it back verbatim, so a mismatch
+    on load (`stale_size_header`) means the file was written by such a tool -
+    or, less often, that it is truncated.
+    """
+
     def __init__(self):
         self.objects = []
-        self.front_padding = None
+        self.has_size_header = True
+        self.stored_size = None      # header as found on load; diagnostic only
+        self.stale_size_header = False
 
     def load(self, data):
         r = Reader(data)
         count = r.i32()
-        if count == -1:
-            self.front_padding = r.u32()
+        self.has_size_header = count == -1
+        self.stored_size = None
+        if self.has_size_header:
+            self.stored_size = r.u32()
             count = r.i32()
-        else:
-            self.front_padding = None
+        self.stale_size_header = (self.has_size_header
+                                  and self.stored_size != len(data))
 
         headers = []
         for _ in range(count):
@@ -331,9 +353,9 @@ class ShaderPackage:
 
     def save(self):
         w = Writer()
-        if self.front_padding is not None:
+        if self.has_size_header:
             w.i32(-1)
-            w.u32(self.front_padding)
+            w.u32(0)  # file size placeholder, filled in below
 
         w.u32(len(self.objects))
         for obj in self.objects:
@@ -343,6 +365,11 @@ class ShaderPackage:
             w.i32(obj.hdr.ref_id)
             w.u32(len(item.buf))
             w.buf += item.buf
+
+        if self.has_size_header:
+            # The file size, now that it is known; it sits at offset 4,
+            # straight after the -1 marker, and counts the whole file.
+            struct.pack_into("<I", w.buf, 4, len(w.buf))
         return bytes(w.buf)
 
     def find_library(self):
@@ -434,7 +461,7 @@ class SVDef:
 
 # D3D-layout files (Windows build): state var IDs are D3DRENDERSTATETYPE
 # values and texture var IDs are D3DSAMPLERSTATETYPE values (verified
-# against old_deferred_lighting_latest.shaders).
+# against deferred_lighting.d3d9.shaders).
 
 ENUM_D3DCMP = [None, "Never", "Less", "Equal", "Less or Equal", "Greater",
                "Not Equal", "Greater or Equal", "Always"]

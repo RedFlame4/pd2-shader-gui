@@ -1,7 +1,7 @@
 # PD2 Shader Tool
 
 GUI editor for PAYDAY 2 / Diesel engine `.shaders` packages (e.g.
-`old_deferred_lighting_latest.shaders`, `deferred_lighting.d3d11.shaders`).
+`deferred_lighting.d3d9.shaders`, `deferred_lighting.d3d11.shaders`).
 Parse, inspect, edit and repack — no dependencies beyond the stock Python 3.
 Both the D3D9 (SM1-3) and D3D11 (SM4-5, DXBC) package layouts are supported;
 the layout is auto-detected per file (see Format notes below).
@@ -11,7 +11,7 @@ the layout is auto-detected per file (see Format notes below).
 macOS / Linux:
 
 ```sh
-python3 shader_web.py ../old_deferred_lighting_latest.shaders
+python3 shader_web.py path/to/file.shaders
 ```
 
 Windows (needs [Python 3](https://www.python.org/downloads/) installed):
@@ -81,7 +81,7 @@ pass's layout while loading by trying both texture-block shapes and checking
 which one leaves the bytecode blobs looking like real shader bytecode
 (D3D9 SM1-3 tokens or a `DXBC` container).
 
-**D3D9 layout** (`old_deferred_lighting_latest.shaders` and similar):
+**D3D9 layout** (`deferred_lighting.d3d9.shaders` and similar):
 texture blocks carry no name string, state-var IDs are raw
 `D3DRENDERSTATETYPE` values, and sampler-var IDs are `D3DSAMPLERSTATETYPE`
 values (sampler names live in the bytecode's CTAB instead).
@@ -99,4 +99,13 @@ displays/edits as a raw number. The per-sampler var ids are likewise their
 own space, only partly recovered — `AddressU`/`AddressV` decode, but D3D11's
 packed filter and the remaining sampler ids stay raw.
 
-Packages load and save byte-identically in both layouts.
+Packages load and save byte-identically in both layouts, with one deliberate
+exception: files normally open with a `-1` marker followed by a u32 holding
+the total file size (counting those 8 bytes). Editing tools — including
+earlier versions of this one — copied that value through unchanged, so a file
+that has been edited before usually carries the *original* file's size. The
+tool recomputes it on save, flags a mismatch in the header bar while the file
+is open, and reports the correction in the save message. Unmodified engine
+files always ship with the value correct, so a mismatch is a reliable sign the
+file has already been through an editing tool. Recomputing therefore restores
+what the engine itself would have written.

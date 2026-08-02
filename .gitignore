@@ -8,6 +8,9 @@ pd2_shader_gui.json
 # Input shader packages
 *.shaders
 
+# Default target of "Export all blobs…" when given a relative path
+shader-export/
+
 # Python
 __pycache__/
 *.py[cod]

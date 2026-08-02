@@ -64,11 +64,22 @@ def selftest(path):
     sp = ShaderPackage()
     sp.load(data)
     out = sp.save()
-    if out == data:
+
+    def summary():
         lib = sp.find_library()
         n_passes = sum(isinstance(o, ObjShaderPass) for o in sp.objects)
-        print("OK: byte-identical round trip (%d bytes, %d render templates, %d passes)"
-              % (len(data), len(lib.render_templates), n_passes))
+        return "%d bytes, %d render templates, %d passes" % (
+            len(data), len(lib.render_templates), n_passes)
+
+    if out == data:
+        print("OK: byte-identical round trip (%s)" % summary())
+        return 0
+    # A stale size header is meant to change: it is recomputed on save, so a
+    # file written by an older tool differs in bytes 4-7 and nowhere else.
+    if sp.stale_size_header and len(out) == len(data) \
+            and out[:4] == data[:4] and out[8:] == data[8:]:
+        print("OK: round trip clean, size header corrected %d -> %d (%s)"
+              % (sp.stored_size, len(out), summary()))
         return 0
     print("FAIL: output differs (input %d bytes, output %d bytes)" % (len(data), len(out)))
     for i, (a, b) in enumerate(zip(data, out)):
@@ -114,7 +125,11 @@ class Session:
 
     def save(self, path=None):
         path = os.path.expanduser(path) if path else self.file_path
-        out = self.package.save()
+        pkg = self.package
+        # Recomputed on save, so report the correction when the file we loaded
+        # carried a stale one (see ShaderPackage).
+        corrected_from = pkg.stored_size if pkg.stale_size_header else None
+        out = pkg.save()
         check = ShaderPackage()
         check.load(out)  # never write something we can't read back
         with open(path, "wb") as f:
@@ -122,7 +137,11 @@ class Session:
         self.file_path = path
         self.original_bytes = out
         self.dirty_passes = set()
-        return path, len(out)
+        # What is on disk now has a correct header; keep the in-memory
+        # bookkeeping in step so the UI stops flagging it.
+        pkg.stored_size = len(out)
+        pkg.stale_size_header = False
+        return path, len(out), corrected_from
 
     def name_of(self, h):
         return self.hashlist.name_of(h)
@@ -164,7 +183,17 @@ class Session:
                 "hashlist": self._hashlist_info(), "tree": tree,
                 "counts": {"templates": len(lib.render_templates),
                            "passes": len(pass_objs)},
-                "layout": layout}
+                "layout": layout, "size_header": self._size_header_info()}
+
+    def _size_header_info(self):
+        """The leading file-size header, and whether the file on disk disagrees
+        with its own length. None for the rare file that has no such header."""
+        pkg = self.package
+        if not pkg.has_size_header:
+            return None
+        return {"stored": pkg.stored_size,
+                "actual": len(self.original_bytes),
+                "stale": pkg.stale_size_header}
 
     def _hashlist_info(self):
         return {"path": self.hashlist.path, "count": len(self.hashlist)}
@@ -266,7 +295,9 @@ class Session:
         self.dirty_passes.add(ref_id)
 
     def export_all(self, out_dir):
-        out_dir = os.path.expanduser(out_dir)
+        # Absolute, so the UI can say where a relative path actually landed
+        # (it resolves against the server's working directory, not the file's).
+        out_dir = os.path.abspath(os.path.expanduser(out_dir))
         lib = self.package.find_library()
         count = 0
         for h, shader in sorted(lib.render_templates.items()):
@@ -284,7 +315,7 @@ class Session:
                         with open(os.path.join(d, "pass%d.%s.asm" % (i, suffix)), "w") as f:
                             f.write(disasm.disassemble(blob))
                         count += 1
-        return count
+        return count, out_dir
 
 
 def safe_name(name, max_len=120):
@@ -371,9 +402,11 @@ class Handler(BaseHTTPRequestHandler):
                 SESSION.open(self._body_json()["path"])
                 self._json(SESSION.state())
             elif url.path == "/api/save":
-                path, size = SESSION.save(self._body_json().get("path"))
-                self._json({"ok": True, "message": "Saved %s (%d bytes)" % (path, size),
-                            "state": SESSION.state()})
+                path, size, corrected = SESSION.save(self._body_json().get("path"))
+                msg = "Saved %s (%d bytes)" % (path, size)
+                if corrected is not None:
+                    msg += " — stale size header corrected %d → %d" % (corrected, size)
+                self._json({"ok": True, "message": msg, "state": SESSION.state()})
             elif url.path == "/api/var":
                 b = self._body_json()
                 SESSION.set_var(b["ref"], b["scope"], b.get("tex", 0),
@@ -387,9 +420,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "detail": SESSION.pass_detail(ref),
                             "state": SESSION.state()})
             elif url.path == "/api/export_all":
-                count = SESSION.export_all(self._body_json()["dir"])
+                count, out_dir = SESSION.export_all(self._body_json()["dir"])
                 self._json({"ok": True,
-                            "message": "Wrote %d blobs (plus disassembly)." % count})
+                            "message": "Wrote %d blobs (plus disassembly) to %s"
+                                       % (count, out_dir)})
             else:
                 self._error("Not found", 404)
         except Exception as e:  # noqa: BLE001

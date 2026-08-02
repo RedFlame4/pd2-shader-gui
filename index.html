@@ -47,6 +47,8 @@
     .ddboxes label { @apply flex gap-1.5 items-center px-2 py-[3px] rounded cursor-pointer
                             whitespace-nowrap hover:bg-acc hover:text-onacc; }
 
+    .chip  { @apply text-warn border border-warn rounded-full px-2 py-0.5
+                    text-xs cursor-help whitespace-nowrap; }
     .hint  { @apply text-dim text-xs mt-2; }
     .empty { @apply text-dim p-10 text-center; }
 
@@ -83,6 +85,11 @@
   <button class="btn" @click="saveFile(false)">Save</button>
   <button class="btn" @click="saveFile(true)">Save As…</button>
   <button class="btn" @click="exportAll()">Export all blobs…</button>
+  <!-- Written by a tool that copied the size header verbatim; saving fixes it. -->
+  <span x-cloak class="chip" x-show="sizeHeader && sizeHeader.stale"
+        :title="sizeHeaderTip()">
+    stale size header
+  </span>
 </header>
 <div class="flex flex-1 min-h-0">
   <!-- Render-template tree -->
@@ -230,7 +237,7 @@ let matchCache = {detail: null, tab: null, q: null, list: []};
 function app() {
   return {
     // --- reactive state ---
-    file: null, dirty: false, lastFile: null, layout: null,
+    file: null, dirty: false, lastFile: null, layout: null, sizeHeader: null,
     counts: {templates: 0, passes: 0}, hashlist: {path: null, count: 0},
     tree: [], open: {},
     detail: null, curRef: null, curTab: 'sv',
@@ -270,10 +277,22 @@ function app() {
       return j;
     },
     setStatus(msg, err = false) { this.statusMsg = msg; this.statusErr = !!err; },
+    sizeHeaderTip() {
+      const s = this.sizeHeader;
+      if (!s) return '';
+      const why = 'Written by a tool that did not correctly calculate filesize;'
+                + ' saving recomputes it.';
+      // Unsaved edits change the length, so the on-disk size is no longer what
+      // a save would write — quote it only while the two still agree.
+      return this.dirty
+        ? `The header said ${s.stored} bytes, which was not this file's size. ${why}`
+        : `The header says ${s.stored} bytes but the file is ${s.actual}. ${why}`;
+    },
     applyStateFrom(s) {
       this.file = s.file; this.dirty = s.dirty;
       this.counts = s.counts || {templates: 0, passes: 0};
       this.layout = s.layout || null;
+      this.sizeHeader = s.size_header || null;
       this.hashlist = s.hashlist || {path: null, count: 0};
       this.tree = s.tree || [];
     },
@@ -485,7 +504,7 @@ function app() {
     },
     async exportAll() {
       if (!this.file) return;
-      const dir = prompt('Export all blobs to directory:', '~/Desktop/shader-export');
+      const dir = prompt('Export all blobs to directory:', 'shader-export');
       if (!dir) return;
       try {
         const r = await this.api('/api/export_all', {method: 'POST', body: JSON.stringify({dir})});
