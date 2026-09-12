@@ -91,17 +91,26 @@ hash of the sampler/texture variable's name (resolved via the hashlist)
 rather than a small register index, since D3D11 bytecode (DXBC, no CTAB)
 has no equivalent table to recover names from. The per-pass state-var id
 space is also different from D3D9's `D3DRENDERSTATETYPE` — D3D11 has no
-`SetRenderState`-style API, so Diesel uses its own compact ids here. That
-mapping has been partly reverse-engineered (by diffing shared passes against
-the D3D9 build): the common depth/stencil/blend/cull states decode to
-names/enums, while any id not yet identified round-trips losslessly and
-displays/edits as a raw number. The per-sampler var ids are likewise their
-own space, only partly recovered — `AddressU`/`AddressV` decode, but D3D11's
-packed filter and the remaining sampler ids stay raw.
+`SetRenderState`-style API, so Diesel uses its own compact ids here. Those
+ids turn out to be the *field index* within each D3D11 descriptor struct at a
+per-descriptor base (rasterizer at 0, depth-stencil at 10, blend at 28),
+reverse-engineered by diffing shared passes against the D3D9 build: the
+common depth/stencil/blend/cull/depth-bias states decode to names/enums,
+while any id not yet identified round-trips losslessly and displays/edits as
+a raw number. Most D3D11 enums are numbered the same as their D3D9
+counterparts and share definitions; `CullMode` is the exception
+(None/Front/Back rather than None/CW/CCW) and `DepthBias` is an int here
+where D3D9 uses a float. The per-sampler var ids are likewise their own
+space — the packed `Filter`, `AddressU`/`AddressV` and `SRGBTexture` decode,
+and the remaining sampler ids stay raw.
 
 Packages load and save byte-identically in both layouts, with one deliberate
 exception: files normally open with a `-1` marker followed by a u32 holding
-the total file size (counting those 8 bytes). Editing tools — including
+the total file size (counting those 8 bytes). Newer packages — such as
+`base.d3d11.shaders` — instead open with a `DODB` magic and a u32 container
+version before that same size word; the object table after it is identical,
+and the tool reads and rewrites whichever form a file arrived in.
+Editing tools — including
 earlier versions of this one — copied that value through unchanged, so a file
 that has been edited before usually carries the *original* file's size. The
 tool recomputes it on save, flags a mismatch in the header bar while the file

@@ -75,9 +75,11 @@ def selftest(path):
         print("OK: byte-identical round trip (%s)" % summary())
         return 0
     # A stale size header is meant to change: it is recomputed on save, so a
-    # file written by an older tool differs in bytes 4-7 and nowhere else.
-    if sp.stale_size_header and len(out) == len(data) \
-            and out[:4] == data[:4] and out[8:] == data[8:]:
+    # file written by an older tool differs in the four bytes of the size word
+    # and nowhere else.
+    off = sp.size_header_offset()
+    if sp.stale_size_header and len(out) == len(data) and off is not None \
+            and out[:off] == data[:off] and out[off + 4:] == data[off + 4:]:
         print("OK: round trip clean, size header corrected %d -> %d (%s)"
               % (sp.stored_size, len(out), summary()))
         return 0

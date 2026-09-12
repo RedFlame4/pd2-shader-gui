@@ -304,9 +304,16 @@ class ObjectHeader:
 
 
 class ShaderPackage:
-    """Files normally open with a -1 marker followed by a u32 holding the
-    total file size (the prefix counts towards its own size); `has_size_header`
-    records whether this one did, and the size itself is recomputed on save.
+    """Two container headers exist; the object table that follows is identical
+    in both, so only the preamble is version-dependent.
+
+    Legacy files open with a -1 marker followed by a u32 holding the total file
+    size (the prefix counts towards its own size). Newer files (observed in
+    base.d3d11.shaders) open with a 'DODB' magic and a u32 container version
+    (1) before that same size word; `dodb_version` records which form was
+    found (None for legacy) so save() reproduces it. `has_size_header` records
+    whether a size word was present at all, and the size itself is recomputed
+    on save.
 
     Confirmed against an unmodified shaders file, where it matched
     the file length exactly. Files that have been through an editing
@@ -316,20 +323,34 @@ class ShaderPackage:
     or, less often, that it is truncated.
     """
 
+    MAGIC_DODB = b"DODB"
+
     def __init__(self):
         self.objects = []
         self.has_size_header = True
+        self.dodb_version = None     # None = legacy -1-marker container
         self.stored_size = None      # header as found on load; diagnostic only
         self.stale_size_header = False
 
     def load(self, data):
         r = Reader(data)
-        count = r.i32()
-        self.has_size_header = count == -1
+        self.dodb_version = None
         self.stored_size = None
-        if self.has_size_header:
+        if data[:4] == self.MAGIC_DODB:
+            r.pos = 4
+            self.dodb_version = r.u32()
+            if self.dodb_version != 1:
+                raise ValueError("Unsupported DODB container version %d"
+                                 % self.dodb_version)
+            self.has_size_header = True
             self.stored_size = r.u32()
             count = r.i32()
+        else:
+            count = r.i32()
+            self.has_size_header = count == -1
+            if self.has_size_header:
+                self.stored_size = r.u32()
+                count = r.i32()
         self.stale_size_header = (self.has_size_header
                                   and self.stored_size != len(data))
 
@@ -351,9 +372,22 @@ class ShaderPackage:
                 raise ValueError(
                     "Object refId=%d: %d unread bytes" % (obj.hdr.ref_id, inner.end - inner.pos))
 
+    def size_header_offset(self):
+        """Byte offset of the u32 file-size word, or None if the file has no
+        size header. It follows the container preamble, so it sits at 4 in a
+        legacy file and at 8 in a DODB one."""
+        if not self.has_size_header:
+            return None
+        return 8 if self.dodb_version is not None else 4
+
     def save(self):
         w = Writer()
-        if self.has_size_header:
+        size_at = self.size_header_offset()
+        if self.dodb_version is not None:
+            w.buf += self.MAGIC_DODB
+            w.u32(self.dodb_version)
+            w.u32(0)  # file size placeholder, filled in below
+        elif self.has_size_header:
             w.i32(-1)
             w.u32(0)  # file size placeholder, filled in below
 
@@ -366,10 +400,10 @@ class ShaderPackage:
             w.u32(len(item.buf))
             w.buf += item.buf
 
-        if self.has_size_header:
-            # The file size, now that it is known; it sits at offset 4,
-            # straight after the -1 marker, and counts the whole file.
-            struct.pack_into("<I", w.buf, 4, len(w.buf))
+        if size_at is not None:
+            # The file size, now that it is known; it sits straight after the
+            # container preamble and counts the whole file.
+            struct.pack_into("<I", w.buf, size_at, len(w.buf))
         return bytes(w.buf)
 
     def find_library(self):
@@ -607,56 +641,148 @@ SV_TYPES_TEX_D3D = {
 # no per-state setter like D3D9's SetRenderState - states are grouped into
 # immutable rasterizer/depth-stencil/blend descriptor objects). They are
 # instead a compact, engine-specific id space Diesel uses for its D3D11
-# backend (observed range in deferred_lighting.d3d11.shaders: 1-46).
+# backend (observed range across deferred_lighting.d3d11 and base.d3d11: 1-46).
 #
-# The mapping below was recovered by diffing deferred_lighting.d3d11.shaders
-# against deferred_lighting.d3d9.shaders: 30 passes exist in both files under
-# the same (render-template, mode, pass-index) keys, and each pass emits its
-# state vars in the *same* canonical order in both backends. Positional
-# alignment across those passes yields an unambiguous d11-id -> d9-id mapping
-# (every id votes unanimously)
+# The id space is the *field index* within each D3D11 descriptor struct, at a
+# per-descriptor base:
 #
-# The recovered ids cluster exactly as the descriptor grouping predicts:
-# rasterizer/misc in 1-5, depth-stencil in 10-24, blend in 29-46. Only the 22
-# states actually used by deferred_lighting are known; other ids in the space
-# are simply never set here. Names/types/enums are single-sourced from the
-# D3D9 tables via this remap so the two stay in sync.
+#   base  0  D3D11_RASTERIZER_DESC    1=CullMode, 3=DepthBias,
+#                                     4=DepthBiasClamp, 5=SlopeScaledDepthBias,
+#                                     8=MultisampleEnable
+#   base 10  D3D11_DEPTH_STENCIL_DESC 10..19 = DepthEnable, DepthWriteMask,
+#                                     DepthFunc, StencilEnable,
+#                                     StencilReadMask, StencilWriteMask,
+#                                     FrontFace.{Fail,DepthFail,Pass,Func}Op;
+#                                     20-23 would be BackFace (never set here),
+#                                     and 24 is StencilRef - not a desc field
+#                                     at all but the OMSetDepthStencilState
+#                                     argument, appended after the 14 fields
+#   base 28  D3D11_BLEND_DESC         28=AlphaToCoverageEnable, 29=BlendEnable,
+#                                     37-39=SrcBlend/DestBlend/BlendOp,
+#                                     44-46=RenderTargetWriteMask[0..2]
+#
+# That model is pinned at 15 independent points by diffing the d3d11 and d3d9
+# builds of the same package: passes that exist in both under the same
+# (render-template, mode, pass-index) key emit their state vars in the same
+# canonical order, so aligning the two sequences from the *head* yields the
+# mapping. base.d3d11.shaders vs base246.1.shaders shares 2771 such passes
+# (deferred_lighting shares 30), and every id votes unanimously.
+#
+# Most D3D11 enums are numbered identically to their D3D9 counterparts
+# (D3D11_COMPARISON_FUNC/_STENCIL_OP/_BLEND/_BLEND_OP/_COLOR_WRITE_ENABLE all
+# match), which is why those values compare bit-identical across the two
+# builds and can reuse the D3D9 SVDefs below. The exceptions get their own
+# definitions in _SV_TYPES_D3D11_OWN.
+#
+# Correction, from base.d3d11 vs base246.1: ids 3 and 5 were previously read as
+# SRGBWriteEnable and SeparateAlphaBlendEnable. Those came from aligning the
+# unequal-length deferred_lighting passes from the *tail* instead of the head -
+# the d3d9 side carries 7 extra states in the middle (DepthBias,
+# SlopeScaleDepthBias, FogEnable, SpecularEnable, AdaptiveTess_X/Z/W) that the
+# D3D11 backend has no use for, so tail-anchoring shifted the last three pairs.
+# In deferred_lighting every state involved happened to be 0, so the two
+# alignments were indistinguishable there. base.d3d11 breaks the tie outright:
+# in its 1091 depth-biased shared passes id 3 = 255 and id 5 = 2.5f, while d3d9
+# SRGBWriteEnable and SeparateAlphaBlendEnable are 0 in all 5207 of its passes
+# and DepthBias/SlopeScaleDepthBias are 0.0002f/2.5f. Id 5 matches d3d9
+# SlopeScaleDepthBias bit-for-bit in all 2771 shared passes; id 3 tracks
+# DepthBias's zero/non-zero exactly but is an *int* (255) where D3D9 uses a
+# float - the documented D3D9-to-D3D11 difference for this state.
+#
+# Id 40 was the third pair of that same refuted tail alignment (it read as
+# AlphaTestEnable) so it has no evidential basis left. It is 0 in all 2776
+# passes of base.d3d11 and all 30 of deferred_lighting.d3d11, and every d3d9
+# state it could correspond to is likewise always 0, so this diff can neither
+# confirm nor place it; the field-index model puts it at blend field 40, which
+# would be RenderTarget[0].SrcBlendAlpha. Left to the raw-number fallback
+# rather than displayed under a name that may be wrong.
+
+ENUM_D3D11_CULL = [None, "None", "Front", "Back"]
+
+
+def _d3d11_filter_names():
+    """Sparse enum table for D3D11_FILTER, which is a bitfield rather than a
+    sequence: bit0 = mip linear, bit2 = mag linear, bit4 = min linear,
+    0x40 = anisotropic, 0x80 = comparison. (D3D11.1's 0x100/0x180 minimum and
+    maximum reduction filters are not used by Diesel.)"""
+    names = [None] * 0xD6
+    for cmp_bit, cmp_name in ((0, ""), (0x80, "Comparison ")):
+        for mn, mn_name in ((0, "Point"), (0x10, "Linear")):
+            for mg, mg_name in ((0, "Point"), (0x04, "Linear")):
+                for mp, mp_name in ((0, "Point"), (0x01, "Linear")):
+                    names[cmp_bit | mn | mg | mp] = "%sMin %s, Mag %s, Mip %s" % (
+                        cmp_name, mn_name, mg_name, mp_name)
+        names[cmp_bit | 0x55] = cmp_name + "Anisotropic"
+    return names
+
+
+ENUM_D3D11_FILTER = _d3d11_filter_names()
+
+# D3D11 ids that denote the same state as a D3D9 render state *and* share its
+# value encoding, so the name/type/enum can be single-sourced from the D3D9
+# table and the two stay in sync.
 _D3D11_TO_D3D9 = {
-    1: 22,    # CullMode
-    3: 194,   # SRGBWriteEnable
-    5: 206,   # SeparateAlphaBlendEnable
-    10: 7,    # ZEnable
-    11: 14,   # ZWriteEnable
+    5: 175,   # SlopeScaleDepthBias
+    11: 14,   # ZWriteEnable    (D3D11 DepthWriteMask ZERO/ALL = 0/1)
     12: 23,   # ZFunc
     13: 52,   # StencilEnable
-    14: 58,   # StencilMask
+    14: 58,   # StencilMask     (D3D11 StencilReadMask)
     15: 59,   # StencilWriteMask
-    16: 53,   # StencilFail
-    17: 54,   # StencilZFail
-    18: 55,   # StencilPass
-    19: 56,   # StencilFunc
+    16: 53,   # StencilFail     (FrontFace.StencilFailOp)
+    17: 54,   # StencilZFail    (FrontFace.StencilDepthFailOp)
+    18: 55,   # StencilPass     (FrontFace.StencilPassOp)
+    19: 56,   # StencilFunc     (FrontFace.StencilFunc)
     24: 57,   # StencilRef
-    29: 27,   # AlphaBlendEnable
+    29: 27,   # AlphaBlendEnable(RenderTarget[0].BlendEnable)
     37: 19,   # SrcBlend
     38: 20,   # DestBlend
     39: 171,  # BlendOp
-    40: 15,   # AlphaTestEnable
-    44: 168,  # ColorWriteEnable
+    44: 168,  # ColorWriteEnable (RenderTargetWriteMask[0])
     45: 190,  # ColorWriteEnable1
     46: 191,  # ColorWriteEnable2
 }
+
+# D3D11 ids needing their own definition: a differently-numbered enum, a
+# different value type, or no D3D9 counterpart at all.
+_SV_TYPES_D3D11_OWN = {
+    # D3D11_CULL_MODE is None/Front/Back where D3DCULL is None/CW/CCW, so the
+    # same id needs a different enum. Confirmed 1:1 against d3d9 CullMode over
+    # the 2771 shared passes: 1 <-> 1 (None) x332, 3 (Back) <-> 2 (CW) x2439.
+    1: SVDef("CullMode", ArgType.ENUM, ENUM_D3D11_CULL),
+    # Int in D3D11 (a raw depth-unit offset), float in D3D9.
+    3: SVDef("DepthBias", ArgType.INT),
+    # D3D11-only: D3D9 has no depth-bias clamp. Emitted only in the 1093
+    # depth-biased passes of base.d3d11, always 0.1f, and at exactly the
+    # rasterizer-desc index the model predicts for it.
+    4: SVDef("DepthBiasClamp", ArgType.FLOAT),
+    # Plain BOOL in D3D11; the D3D9 id is the tri-state D3DZBUFFERTYPE.
+    10: SVDef("ZEnable", ArgType.BOOL),
+    # 8 and 28 are always 0 in both sample files, so the diff cannot
+    # discriminate them - they are named from the field-index model alone
+    # (rasterizer field 8, blend field 0) and both are BOOLs there.
+    8: SVDef("MultisampleEnable", ArgType.BOOL),
+    28: SVDef("AlphaToCoverageEnable", ArgType.BOOL),
+}
+
 SV_TYPES_D3D11 = {d11: SV_TYPES_D3D[d9] for d11, d9 in _D3D11_TO_D3D9.items()}
+SV_TYPES_D3D11.update(_SV_TYPES_D3D11_OWN)
 
 # Texture/sampler vars: D3D11 sampler descriptors are shaped differently from
-# D3D9's per-state model, so only the address modes are direct matches. id1/id2
-# carry the same D3DTADDRESS enum values as D3D9 AddressU/AddressV. id0 is a
-# *packed* D3D11_FILTER (observed 0x00/0x15/0x55/0x94 = point / linear /
-# anisotropic / comparison-linear) that collapses D3D9's separate
-# Mag/Min/MipFilter, so it has no single-field D3D9 equivalent; id6 and id13
-# appear too rarely to identify. Those are left to the raw-number fallback.
+# D3D9's per-state model. id1/id2 carry the same D3DTADDRESS enum values as
+# D3D9 AddressU/AddressV. id0 is a *packed* D3D11_FILTER that collapses D3D9's
+# separate Mag/Min/MipFilter; aligning the 3729 texture blocks that pair up
+# across base.d3d11 and base246.1 maps it unanimously (0x55 <-> all three D3D9
+# filters Anisotropic, 0x15 <-> all three Linear, 0x00 <-> all three Point),
+# and deferred_lighting.d3d11 additionally uses 0x94 (comparison, min/mag
+# linear, mip point) for its shadow samplers. id13 is SRGBTexture: it is
+# present with value 1 in exactly the 2308 of those blocks whose D3D9 side has
+# SRGBTexture=1 and omitted in exactly the 1421 where it is 0. id6 appears in
+# neither sample file and is left to the raw-number fallback.
 SV_TYPES_TEX_D3D11 = {
-    1: SV_TYPES_TEX_D3D[1],  # AddressU
-    2: SV_TYPES_TEX_D3D[2],  # AddressV
+    0: SVDef("Filter", ArgType.ENUM, ENUM_D3D11_FILTER),
+    1: SV_TYPES_TEX_D3D[1],   # AddressU
+    2: SV_TYPES_TEX_D3D[2],   # AddressV
+    13: SV_TYPES_TEX_D3D[11],  # SRGBTexture
 }
 
 
