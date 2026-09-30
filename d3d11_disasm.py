@@ -83,12 +83,14 @@ INT_TYPED_MNEMONICS = {
 }
 
 # D3D10_SB_RESOURCE_DIMENSION, packed directly into bits 11-15 of
-# DCL_RESOURCE's own opcode token (verified against this file's bytecode -
-# a full-screen depth/diffuse sample pass decodes to dim=3 "texture2d",
-# matching what the pass actually binds).
+# DCL_RESOURCE's own opcode token. Verified by compiling one-resource-per-type
+# test shaders through fxc and reading the raw dim bits back: multisample
+# dimensions sit BEFORE texture3d/texturecube/array types, not after (an
+# earlier version of this table had them swapped, mislabeling e.g. a real
+# TextureCube as "texture1darray" - dim=6 is texturecube, not texture1darray).
 RESOURCE_DIMS = {0: "unknown", 1: "buffer", 2: "texture1d", 3: "texture2d",
-                 4: "texture3d", 5: "texturecube", 6: "texture1darray",
-                 7: "texture2darray", 8: "texture2dms", 9: "texture2dmsarray",
+                 4: "texture2dms", 5: "texture3d", 6: "texturecube",
+                 7: "texture1darray", 8: "texture2darray", 9: "texture2dmsarray",
                  10: "texturecubearray", 11: "raw_buffer", 12: "structured_buffer"}
 RETURN_TYPES = {1: "unorm", 2: "snorm", 3: "sint", 4: "uint", 5: "float",
                 6: "mixed", 7: "double", 8: "continued", 9: "unused"}
